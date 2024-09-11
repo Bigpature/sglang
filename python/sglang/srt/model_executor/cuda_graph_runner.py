@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-"""Run the model with cuda graph."""
+"""Run the model with cuda graph and torch.compile."""
 
 import bisect
 from contextlib import contextmanager
@@ -58,6 +58,7 @@ def _to_torch(model: torch.nn.Module, reverse: bool = False):
 def patch_model(
     model: torch.nn.Module, enable_compile: bool, tp_group: "GroupCoordinator"
 ):
+    """Patch the model to make it compatible with with torch.compile"""
     backup_ca_comm = None
 
     try:
@@ -89,23 +90,28 @@ def set_torch_compile_config():
 
 
 class CudaGraphRunner:
-    def __init__(
-        self,
-        model_runner: "ModelRunner",
-        max_batch_size_to_capture: int,
-        use_torch_compile: bool,
-        disable_padding: bool,
-    ):
+    """A CudaGraphRunner runs the forward pass of a model with cuda graph and torch.compile."""
+
+    def __init__(self, model_runner: "ModelRunner"):
+        # Parse args
         self.model_runner = model_runner
         self.graphs = {}
         self.input_buffers = {}
         self.output_buffers = {}
         self.flashinfer_handlers = {}
         self.graph_memory_pool = None
-        self.disable_padding = disable_padding
+        self.use_torch_compile = model_runner.server_args.enable_torch_compile
+        self.disable_padding = model_runner.server_args.disable_padding
+
+        # Constants
+        if self.model_runner.server_args.disable_cuda_graph_padding:
+            self.capture_bs = list(range(1, 32)) + [64, 128]
+        else:
+            self.capture_bs = [1, 2, 4] + [i * 8 for i in range(1, 21)]
+        self.compile_bs = [1, 2, 4, 8, 16, 24, 32] if self.use_torch_compile else []
 
         # Common inputs
-        self.max_bs = max_batch_size_to_capture
+        self.max_bs = max(self.capture_bs)
         self.input_ids = torch.zeros((self.max_bs,), dtype=torch.int32, device="cuda")
         self.req_pool_indices = torch.zeros(
             (self.max_bs,), dtype=torch.int32, device="cuda"
@@ -130,13 +136,14 @@ class CudaGraphRunner:
         self.flashinfer_kv_last_page_len = torch.ones(
             (self.max_bs,), dtype=torch.int32, device="cuda"
         )
+
         if model_runner.sliding_window_size is None:
             self.flashinfer_workspace_buffer = (
-                self.model_runner.flashinfer_workspace_buffer
+                self.model_runner.attn_backend.flashinfer_workspace_buffer
             )
         else:
             self.flashinfer_workspace_buffer = (
-                self.model_runner.flashinfer_workspace_buffer
+                self.model_runner.attn_backend.flashinfer_workspace_buffer
             )
 
             self.flashinfer_kv_indptr = [
@@ -152,10 +159,21 @@ class CudaGraphRunner:
         vocab_size = model_runner.model_config.vocab_size
         self.sampling_info = SamplingBatchInfo.dummy_one(self.max_bs, vocab_size)
 
-        self.compile_bs = [1, 2, 4, 8, 16, 24, 32] if use_torch_compile else []
-
-        if use_torch_compile:
+        if self.use_torch_compile:
             set_torch_compile_config()
+
+        # Capture
+        try:
+            self.cuda_graph_runner.capture()
+        except RuntimeError as e:
+            raise Exception(
+                f"Capture cuda graph failed: {e}\n"
+                "Possible solutions:\n"
+                "1. disable cuda graph by --disable-cuda-graph\n"
+                "2. set --mem-fraction-static to a smaller value\n"
+                "3. disable torch compile by not using --enable-torch-compile\n"
+                "Open an issue on GitHub https://github.com/sgl-project/sglang/issues/new/choose \n"
+            )
 
     def can_run(self, batch_size: int):
         if self.disable_padding:
@@ -163,11 +181,10 @@ class CudaGraphRunner:
         else:
             return batch_size <= self.max_bs
 
-    def capture(self, batch_size_list: List[int]):
-        self.batch_size_list = batch_size_list
+    def capture(self):
         with graph_capture() as graph_capture_context:
             self.stream = graph_capture_context.stream
-            for bs in batch_size_list:
+            for bs in self.capture_bs:
                 with patch_model(
                     self.model_runner.model,
                     bs in self.compile_bs,

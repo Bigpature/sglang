@@ -83,8 +83,8 @@ class ServerArgs:
     json_model_override_args: str = "{}"
 
     # Optimization/debug options
-    attention_backend: str = "flashinfer"
-    sampling_backend: str = "flashinfer"
+    attention_backend: Optional[str] = None
+    sampling_backend: Optional[str] = None
 
     disable_flashinfer: bool = False
     disable_flashinfer_sampling: bool = False
@@ -134,17 +134,15 @@ class ServerArgs:
         if self.random_seed is None:
             self.random_seed = random.randint(0, 1 << 30)
 
-        # Deprecation warnings
-        if self.disable_flashinfer:
-            logger.warning(
-                "The option '--disable-flashinfer' will be deprecated in the next release. "
-                "Please use '--attention-backend triton' instead."
-            )
-        if self.disable_flashinfer_sampling:
-            logger.warning(
-                "The option '--disable-flashinfer-sampling' will be deprecated in the next release. "
-                "Please use '--sampling-backend pytorch' instead. "
-            )
+        if self.attention_backend is None:
+            self.attention_backend = "flashinfer"
+
+        if self.sampling_backend is None:
+            self.sampling_backend = "flashinfer"
+
+        if self.enable_mla:
+            logger.info("MLA optimization is tunred on. Use triton backend.")
+            self.attention_backend = "triton"
 
         # Model-specific patches
         if "Alibaba-NLP/gte-Qwen2-1.5B-instruct" == self.model_path:
@@ -156,6 +154,18 @@ class ServerArgs:
         if "gemma-2" in self.model_path.lower():
             logger.info("When using sliding window in gemma-2, turn on flashinfer.")
             self.attention_backend = "flashinfer"
+
+        # Deprecation warnings
+        if self.disable_flashinfer:
+            logger.warning(
+                "The option '--disable-flashinfer' will be deprecated in the next release. "
+                "Please use '--attention-backend triton' instead."
+            )
+        if self.disable_flashinfer_sampling:
+            logger.warning(
+                "The option '--disable-flashinfer-sampling' will be deprecated in the next release. "
+                "Please use '--sampling-backend pytorch' instead. "
+            )
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
