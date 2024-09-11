@@ -131,7 +131,7 @@ class HFRunner:
                         else:
                             input_ids = torch.tensor([p], device="cuda")
 
-                        if lora_paths is not None:
+                        if lora_paths is not None and lora_paths[i] is not None:
                             self.model = PeftModel.from_pretrained(
                                 self.base_model,
                                 lora_paths[i],

@@ -525,7 +525,7 @@ class ServerArgs:
             "--max-loras-per-batch",
             type=int,
             default=8,
-            help="Maximum number of adapters for a running batch",
+            help="Maximum number of adapters for a running batch, include base-only request",
         )
 
     @classmethod
