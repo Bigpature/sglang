@@ -69,6 +69,7 @@ class InputMetadata:
 
     # Output location of the KV cache
     out_cache_loc: torch.Tensor
+    running_bs: int = 0
 
     total_num_tokens: int = None
 
@@ -196,6 +197,7 @@ class InputMetadata:
             req_to_token_pool=model_runner.req_to_token_pool,
             token_to_kv_pool=model_runner.token_to_kv_pool,
             out_cache_loc=batch.out_cache_loc,
+            running_bs=batch.running_bs,
             return_logprob=batch.return_logprob,
             top_logprobs_nums=batch.top_logprobs_nums,
         )
@@ -262,6 +264,7 @@ class InputMetadata:
             self.seq_lens,
             prefix_lens,
             flashinfer_use_ragged=flashinfer_use_ragged,
+            running_bs=self.running_bs,
         )
 
         (

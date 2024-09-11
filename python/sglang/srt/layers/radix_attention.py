@@ -66,9 +66,11 @@ class RadixAttention(nn.Module):
         ):
             self.extend_forward = self.extend_forward_flashinfer
             self.decode_forward = self.decode_forward_flashinfer
+            self.mixed_forward = self.mixed_forward_flashinfer
         elif global_server_args_dict["attention_backend"] == "triton":
             self.extend_forward = self.extend_forward_triton
             self.decode_forward = self.decode_forward_triton
+            self.mixed_forward = self.mixed_forward_triton
         else:
             raise ValueError(
                 f"Invalid attention backend: {global_server_args_dict['attention_backend']}"
@@ -126,6 +128,9 @@ class RadixAttention(nn.Module):
         )
 
         return o
+
+    def mixed_forward_triton(self):
+        raise NotImplementedError
 
     def extend_forward_flashinfer(self, q, k, v, input_metadata: InputMetadata):
         # using two wrappers is unnecessary in the current PR, but are prepared for future PRs
@@ -202,13 +207,33 @@ class RadixAttention(nn.Module):
 
         return o.view(-1, self.tp_q_head_num * self.head_dim)
 
+    def mixed_forward_flashinfer(self, q, k, v, input_metadata: InputMetadata):
+        out_cache_loc = input_metadata.out_cache_loc
+        bs0 = len(out_cache_loc) - input_metadata.running_bs
+        q0, q1 = q[:bs0], q[bs0:]
+        k0, k1 = k[:bs0], k[bs0:]
+        v0, v1 = v[:bs0], v[bs0:]
+        loc0, loc1 = out_cache_loc[:bs0], out_cache_loc[bs0:]
+
+        input_metadata.out_cache_loc = loc0
+        o0 = self.extend_forward_flashinfer(q0, k0, v0, input_metadata)
+
+        input_metadata.out_cache_loc = loc1
+        o1 = self.decode_forward_flashinfer(q1, k1, v1, input_metadata)
+
+        input_metadata.out_cache_loc = out_cache_loc
+
+        return torch.cat([o0, o1], dim=0)
+
     def forward(self, q, k, v, input_metadata: InputMetadata):
         if k is not None:
             assert v is not None
             k = k.view(-1, self.tp_k_head_num, self.qk_head_dim)
             v = v.view(-1, self.tp_v_head_num, self.v_head_dim)
 
-        if input_metadata.forward_mode.is_extend():
+        if input_metadata.forward_mode.is_mixed():
+            return self.mixed_forward(q, k, v, input_metadata)
+        elif input_metadata.forward_mode.is_extend():
             return self.extend_forward(q, k, v, input_metadata)
         elif input_metadata.forward_mode.is_decode():
             return self.decode_forward(q, k, v, input_metadata)
